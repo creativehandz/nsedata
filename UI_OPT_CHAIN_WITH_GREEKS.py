@@ -169,10 +169,12 @@ class DataFetcher:
                 # print(f"ATM_STRIKE : {atm_strike}\n\n")
                 df.columns = [col.upper() for col in df.columns]
                 df.rename(columns = {"STRIKE_PRICE" : "STRIKE"}, inplace=True)
-                df['PCR'] = round(df['OI'] / df[' OI'])
+                df['PCR'] = round(df['OI'] / df[' OI'], 4)
+                df['PCR'] = df['PCR'].apply(lambda x: f"{x:.4f}")
+                df['PCR'] = df['PCR'].astype(float)
                 df = df[[' VOLUME', ' VEGA', ' THETA', ' GAMMA',' DELTA', ' IV', ' OI', ' LTP',
                             'STRIKE', 'PCR', 'LTP', 'OI', 'IV', 'DELTA', 'GAMMA', 'THETA', 'VEGA', 'VOLUME']]
-            
+
                 self.nfo_ce_pe_filtered[f'{expiry}'] = df.copy()
                 index_atmA = self.nfo_ce_pe_filtered[f'{expiry}'][self.nfo_ce_pe_filtered[f'{expiry}']['STRIKE'] == atm_strike].index
                 index_atm = int(index_atmA[0])
