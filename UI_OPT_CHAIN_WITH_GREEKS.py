@@ -9,6 +9,11 @@ import time
 from playwright.sync_api import Playwright, sync_playwright
 from urllib.parse import parse_qs, urlparse, quote
 import pyotp
+import sqlite3
+from tkinter import Canvas
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 class DataFetcher:
     def __init__(self, api_key, secret_key, totkey, pin, redirect_url, mobile_num):
@@ -26,13 +31,11 @@ class DataFetcher:
         self.nfo_ce_pe_filtered = {}
         self.expiries = None
         self.atm_price = None
+        self.LUD = datetime.now().date().strftime("%d-%m-%Y")
+        self.LUT = None
         self.initialize_connection()
 
     def initialize_connection(self):
-        # self.obj = SmartConnect(api_key=self.api_key)
-        # data = self.obj.generateSession(self.userid, self.pin, pyotp.TOTP(self.totkey).now())
-        # self.refreshToken = data['data']['refreshToken']
-        # self.obj.getProfile(self.refreshToken)
         rurl_encode = quote(self.redirect_url, safe="")
         self.AUTH_URL = f"https://api-v2.upstox.com/login/authorization/dialog?response_type=code&client_id={self.api_key}&redirect_uri={rurl_encode}"
         with sync_playwright() as playwright:
@@ -55,7 +58,8 @@ class DataFetcher:
         response = requests.post(url, headers = headers, data = data)
         json_response = response.json()
         self.access_token = json_response['access_token']
-
+        # print(self.access_token)
+        # self.access_token = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiJBQTM1MDkiLCJqdGkiOiI2NzZmYTQ0Nzc0Mzk4ZDE2MTdmYzJiNWUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaWF0IjoxNzM1MzY5Nzk5LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3MzU0MjMyMDB9.ojRaV7cguhTHYiBr73v7SgJX9PuJExlD1PMa-DHa1Ig"
 
         opt_C_url = "https://api.upstox.com/v2/option/contract"
         headers = {
@@ -178,13 +182,59 @@ class DataFetcher:
                 self.nfo_ce_pe_filtered[f'{expiry}'] = df.copy()
                 index_atmA = self.nfo_ce_pe_filtered[f'{expiry}'][self.nfo_ce_pe_filtered[f'{expiry}']['STRIKE'] == atm_strike].index
                 index_atm = int(index_atmA[0])
-                self.nfo_ce_pe_filtered[f'{expiry}'] = self.nfo_ce_pe_filtered[f'{expiry}'].loc[index_atm-5:index_atm+5,:]
+                self.nfo_ce_pe_filtered[f'{expiry}'] = self.nfo_ce_pe_filtered[f'{expiry}'].loc[index_atm-4:index_atm+4,:]
                 # print(self.nfo_ce_pe_filtered[f'{expiry}'].head())
+                self.store_averages()
             return True
             
         except Exception as e:
             print(f"Error in fetch_market_data: {e}")
             return False
+
+    def store_averages(self):
+        """
+        Calculate averages and store them in the database.
+        """
+        conn = sqlite3.connect("market_data.db")
+        cursor = conn.cursor()
+        
+        # Create table if not exists
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS averages (
+                expiry TEXT,
+                date TEXT,
+                time TEXT,
+                avg_vega_CE REAL,
+                avg_theta_CE REAL,
+                avg_iv_CE REAL,
+                avg_vega_PE REAL,
+                avg_theta_PE REAL,
+                avg_iv_PE REAL  ,
+                avg_oi_CE,
+                avg_oi_PE  
+            )
+        """)
+        
+        for expiry, df in self.nfo_ce_pe_filtered.items():
+            avg_vega_CE = df[' VEGA'].mean()# + (df[' VEGA'].mean() * (random.uniform(0.03, 0.09)))
+            avg_theta_CE = df[' THETA'].mean()# + (df[' THETA'].mean() * (random.uniform(0.03, 0.09)))
+            avg_IV_CE = df[' IV'].mean()# + (df[' IV'].mean() * (random.uniform(0.03, 0.09)))
+            avg_vega_PE = df['VEGA'].mean()# + (df['VEGA'].mean() * (random.uniform(0.03, 0.09)))
+            avg_theta_PE = df['THETA'].mean()# + (df[' IV'].mean() * (random.uniform(0.03, 0.09)))
+            avg_IV_PE = df['IV'].mean()# + (df['IV'].mean() * (random.uniform(0.03, 0.09)))
+            avg_OI_PE = df['OI'].mean()
+            avg_OI_CE = df[' OI'].mean()
+            self.LUT = str(datetime.now().time().strftime("%H:%M:%S"))
+
+            # Insert or replace record
+            cursor.execute("""
+                INSERT INTO averages (expiry, date, time, avg_vega_CE, avg_theta_CE, avg_iv_CE, avg_vega_PE, avg_theta_PE, avg_iv_PE, avg_oi_CE, avg_oi_PE)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (expiry, self.LUD, self.LUT, avg_vega_CE, avg_theta_CE, avg_IV_CE, avg_vega_PE, avg_theta_PE, avg_IV_PE, avg_OI_CE, avg_OI_PE))
+        
+        conn.commit()
+        conn.close()
+        # print("Averages stored in database.")
 
 class ExpiryTableApp:
     def __init__(self, root, data_fetcher):
@@ -213,12 +263,22 @@ class ExpiryTableApp:
         self.sort_order = {}
         self.columns = None
         
+        #Plot Settings
+        self.fig = None
+        self.ax = None
+        self.ce_line = None
+        self.pe_line = None
+        self.ce_current = None
+        self.pe_current = None
+        self.canvas = None
+
         # Auto-update control
         self.update_thread = None
         self.running = True
         self.update_interval = 1000  # 1 second during market hours
         self.check_interval = 60000  # 1 minute outside market hours
         self.last_update_time = None
+        self.last_update_date = datetime.now().date()
         
         # Initialize UI
         self.setup_ui()
@@ -247,8 +307,9 @@ class ExpiryTableApp:
             while self.running:
                 try:
                     current_time = datetime.now().time()
-                    market_start = datetime.strptime("09:14:00", "%H:%M:%S").time()
-                    market_end = datetime.strptime("15:35:00", "%H:%M:%S").time()
+                    self.last_update_time = current_time
+                    market_start = datetime.strptime("09:30:00", "%H:%M:%S").time()
+                    market_end = datetime.strptime("15:30:00", "%H:%M:%S").time()
                     
                     if market_start <= current_time <= market_end:
                         # During market hours
@@ -269,14 +330,16 @@ class ExpiryTableApp:
     def is_market_hours(self):
         """Check if current time is during market hours."""
         current_time = datetime.now().time()
-        market_start = datetime.strptime("09:15:00", "%H:%M:%S").time()
+        market_start = datetime.strptime("00:00:00", "%H:%M:%S").time()
         market_end = datetime.strptime("15:30:00", "%H:%M:%S").time()
         return market_start <= current_time <= market_end
 
     def setup_ui(self):
         # Configure root window
-        self.root.geometry("1000x700")
-        self.root.minsize(900, 600)
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        self.root.geometry(f"{screen_width}x{screen_height}")
+        # self.root.overrideredirect(True)  # Remove window borders (optional)
 
         # Configure styles
         style = ttk.Style()
@@ -349,6 +412,22 @@ class ExpiryTableApp:
 
         # Setup table
         self.setup_table()
+
+        # Add Canvas for plotting
+        self.plot_frame = tk.Frame(self.root, bg="#424752")
+        self.plot_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Dropdown for selecting average to plot
+        self.plot_variable = tk.StringVar(value="VEGA")
+        self.plot_dropdown = ttk.Combobox(
+            self.plot_frame, textvariable=self.plot_variable, values=["VEGA", "THETA", "IV", "OI"]
+        )
+        self.plot_dropdown.pack(side=tk.TOP, pady=5)
+        self.plot_dropdown.bind("<<ComboboxSelected>>", self.update_plot)
+        
+        # Canvas for the chart
+        self.chart_canvas = Canvas(self.plot_frame)
+        self.chart_canvas.pack(fill=tk.BOTH, expand=True)
 
     def setup_table(self):
         if not self.data_fetcher.nfo_ce_pe_filtered or not self.data_fetcher.expiries:
@@ -434,7 +513,7 @@ class ExpiryTableApp:
     
         # Schedule next blink
         self.blink_after_id = self.root.after(500, self.toggle_blink)  # Blink every 500ms
-
+    
     def update_table(self, data=None):
         try:
             # Clear existing rows
@@ -503,9 +582,160 @@ class ExpiryTableApp:
                     else:
                         avgs.append("")
             self.tree.insert("", "end", values=avgs, tags=("row",))
+
+
+            # Update the plot
+            self.update_plot()
         
         except Exception as e:
-            print(f"Error updating table: {e}")
+             print(f"Error updating table: {e}")
+
+    def resample_data_preserve_last(self, df, sample_period='5min', CE_COL=None, PE_COL=None):
+        """
+        Resample time series data using mean aggregation while preserving the last row.
+        
+        Args:
+            df: DataFrame with datetime index and data columns
+            sample_period: Sampling period (default '5min' for 5 minutes)
+            
+        Returns:
+            DataFrame with resampled historical data plus the last row
+        """
+        if len(df) <= 1:
+            return df
+            
+        # Separate the last row
+        last_row = df.iloc[[-1]]
+        
+        # Resample all but the last row
+        historical_data = df.iloc[:-1]
+        resampled_historical = historical_data.resample(sample_period).agg({
+                                            f'{CE_COL}': 'mean',  # Numeric column
+                                            f'{PE_COL}': 'mean',  # Numeric column
+                                            'expiry': 'last'        # Non-numeric column
+                                        })
+        
+        # Combine resampled historical data with the last row
+        return pd.concat([resampled_historical, last_row])
+
+    def create_enhanced_plot(self, ax, time_index, ce_data, pe_data, title_var):
+        """
+        Create an enhanced plot with better styling and formatting.
+        """
+        if self.ce_line is None:
+            # First time setup
+            self.ce_line, = ax.plot(time_index[:-1], ce_data[:-1], 
+                    label=f"CE {title_var}", linewidth=1, marker='o', 
+                    markersize=2, alpha=0.8)
+            self.pe_line, = ax.plot(time_index[:-1], pe_data[:-1], 
+                    label=f"PE {title_var}", linewidth=1, marker='o', 
+                    markersize=2, alpha=0.8)
+            
+            self.ce_current = ax.plot(time_index[-1:], ce_data[-1:], '*', 
+                    color=self.ce_line.get_color(), markersize=15, 
+                    label='Current CE')[0]
+            self.pe_current = ax.plot(time_index[-1:], pe_data[-1:], '*', 
+                    color=self.pe_line.get_color(), markersize=15, 
+                    label='Current PE')[0]
+        else:
+            # Update existing lines
+            self.ce_line.set_data(time_index[:-1], ce_data[:-1])
+            self.pe_line.set_data(time_index[:-1], pe_data[:-1])
+            self.ce_current.set_data(time_index[-1:], ce_data[-1:])
+            self.pe_current.set_data(time_index[-1:], pe_data[-1:])
+        
+        # Enhance grid
+        ax.grid(True, linestyle='--', alpha=0.7, lw=0.5)
+        
+        # Style improvements
+        ax.set_xlabel("Time", fontsize=5)
+        ax.set_ylabel(title_var, fontsize=5)
+        
+        # Enhance legend
+        ax.legend(loc='upper left',frameon=True, fancybox=True, shadow=True, fontsize='xx-small')
+        
+        # Format x-axis
+        ax.tick_params(axis='x', rotation=90)
+        ax.tick_params(axis='both', labelsize='x-small')
+        
+        # Auto-scale the axes
+        ax.relim()
+        ax.autoscale_view()
+        
+        return ax
+
+    def parse_datetime(self, time_str):
+        """
+        Parse datetime string using multiple possible formats.
+        """
+        formats = [
+            '%Y-%m-%d %H:%M:%S',
+            '%Y-%m-%d %H:%M:%S.%f',
+            '%Y-%m-%d %H:%M',
+            '%Y-%m-%d'
+        ]
+        
+        for fmt in formats:
+            try:
+                return pd.to_datetime(time_str, format=fmt)
+            except ValueError:
+                continue
+        
+        return pd.to_datetime(time_str)
+
+    def update_plot(self, event=None):
+        """
+        Update the plot with resampled data and enhanced visualization.
+        """
+        conn = sqlite3.connect("market_data.db")
+        
+        query = f"""
+        SELECT time, 
+            expiry,
+            avg_{self.plot_variable.get().lower()}_CE, 
+            avg_{self.plot_variable.get().lower()}_PE 
+        FROM averages
+        ORDER BY time
+        """
+        
+        df = pd.read_sql_query(query, conn)
+        df = df[df['expiry'] == self.selected_expiry.get()]
+        if df.empty:
+            conn.close()
+            return
+            
+        # Convert the time column to datetime with explicit format handling
+        df['time'] = df['time'].apply(self.parse_datetime)
+        
+        # Set the time column as index
+        df.set_index('time', inplace=True)
+        
+        conn.close()
+            
+        # Resample data while preserving the last point
+        resampled_df = self.resample_data_preserve_last(df, '5min', f"avg_{self.plot_variable.get().lower()}_CE", f"avg_{self.plot_variable.get().lower()}_PE")
+        
+        if self.fig is None:
+            # First time creation
+            self.fig = Figure(figsize=(10, 4), dpi=100)
+            self.ax = self.fig.add_subplot(111)
+            self.canvas = FigureCanvasTkAgg(self.fig, master=self.chart_canvas)
+            self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Create/update enhanced plot
+        self.ax = self.create_enhanced_plot(
+            self.ax,
+            resampled_df.index,
+            resampled_df[f'avg_{self.plot_variable.get().lower()}_CE'],
+            resampled_df[f'avg_{self.plot_variable.get().lower()}_PE'],
+            self.plot_variable.get()
+        )
+        
+        # Adjust layout to prevent overlapping
+        self.fig.tight_layout()
+        
+        # Update canvas
+        self.canvas.draw()
 
     def reset_sort_and_update_table(self):
         # Reset sorting state
